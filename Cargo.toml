@@ -1,0 +1,13 @@
+[package]
+name = "chatroom"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mini-openai = { version = "*", features = ["reqwest"] }
+clap = { version = "4.1.16", features = ["derive"] }
+futures = "0.3.31"
+irc = "1.0.0"
+tokio = { version = "1.41.0", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
