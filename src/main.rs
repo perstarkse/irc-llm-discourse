@@ -3,7 +3,7 @@ use clap::Parser;
 use irc::client::prelude::*;
 use std::{error::Error, sync::Arc};
 use tokio::sync::Mutex; // Import Tokio's asynchronous Mutex
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 /// Simple IRC Logger Application
@@ -23,16 +23,19 @@ struct Args {
     port: u16,
 
     /// IRC channel to join (e.g., #rust)
-    #[arg(short, long, default_value = "#rust")]
+    #[arg(short, long, default_value = "#chat_0098")]
     channel: String,
 
     /// IRC nickname
-    #[arg(short, long, default_value = "rust_bot")]
+    #[arg(short, long, default_value = "bot")]
     nickname: String,
 
     /// Use TLS for connection
     #[arg(long)]
     tls: bool,
+
+    #[arg(short,long, default_value = "false")]
+    leader: bool,
 }
 
 #[tokio::main]
@@ -42,7 +45,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Initialize tracing subscriber for logging
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::INFO)
         .with_target(false) // Hide the target (module path)
         .with_thread_names(true)
         .with_thread_ids(true)
@@ -74,6 +76,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Clone necessary variables for message processing
     let model = args.model.clone();
 
+    let leader = args.leader.clone();
+
     // Create a stream of incoming messages
     let mut stream = client.stream()?;
 
@@ -87,80 +91,95 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let history = Arc::new(Mutex::new(Vec::new()));
 
     // Process incoming messages
-    while let Some(message) = stream.next().await.transpose()? {
-        match &message.command {
-            Command::PRIVMSG(target, msg) => {
-                // Only process messages from the specified channel
-                if target.eq_ignore_ascii_case(&args.channel) {
-                    let sender = message
-                        .source_nickname()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    info!("[{}] <{}> {}", model, sender, msg);
+while let Some(message) = stream.next().await.transpose()? {
+    match &message.command {
+        Command::PRIVMSG(target, msg) => {
+            // Only process messages from the specified channel
+            if target.eq_ignore_ascii_case(&args.channel) {
+                let sender = message
+                    .source_nickname()
+                    .unwrap_or("unknown")
+                    .to_string();
+                debug!("<{}> {}", sender, msg);
 
-                    // Lock the history for mutation
-                    {
-                        let mut history_guard = history.lock().await;
-                        history_guard.push(format!("{} - {}", sender, msg));
-                    }
+                // Prepare the OpenAI request
+                let mut request = mini_openai::ChatCompletions::default();
 
-                    // Debug log the current history
-                    {
-                        let history_guard = history.lock().await;
-                        info!("{:#?}", *history_guard);
-                    }
+                request.model = "o1-mini".to_string();
 
-                    // Prepare the OpenAI request
-                    let mut request = mini_openai::ChatCompletions::default();
+                // Lock the history for reading
+                let mut history_guard = history.lock().await;
 
-                    // Clone history for building the request
-                    let history_guard = history.lock().await;
-                    for message in history_guard.iter() {
-                        request.messages.push(mini_openai::Message { 
-                            content: message.clone(), 
-                            role: mini_openai::ROLE_USER.to_string(),
-                        });
-                    }
+                // Add the current message to the history
+                history_guard.push(format!("{} - {}", sender, msg));
 
-                    // Send the request to OpenAI
-                    let response = match llm.chat_completions(&request).await {
-                        Ok(resp) => resp,
-                        Err(e) => {
-                            error!("OpenAI API request failed: {}", e);
-                            continue;
-                        }
-                    };
+                // Add system message
+                request.messages.push(mini_openai::Message { content: "only respond with unformatted text messages, no markdown".to_string(), role:mini_openai::ROLE_USER.to_string()});
 
-                    let reply = response.choices.get(0)
-                        .and_then(|choice| Some(choice.message.content.clone()))
-                        .unwrap_or_else(|| "No response from OpenAI.".to_string());
-
-                    info!("{}", reply);
-
-                    // Send the response back to the IRC channel
-                    // if let Err(e) = client.send_privmsg(&args.channel, &reply) {
-                    //     error!("Failed to send message to IRC: {}", e);
-                    // } else {
-                    //     info!("Sent response to IRC channel.");
-                    // }
-                    client.send_privmsg(&args.channel, &reply).unwrap();
-
-                    // Add the response to history
-                    // {
-                    //     let mut history_guard = history.lock().await;
-                    //     history_guard.push(format!("{} - {}", args.nickname, reply));
-                    // }
-
-                    // // Optionally, log the updated history
-                    // {
-                    //     let history_guard = history.lock().await;
-                    //     info!("{:#?}", *history_guard);
-                    // }
+                // Clone history for building the request
+                for message in history_guard.iter() {
+                    request.messages.push(mini_openai::Message { 
+                        content: message.clone(), 
+                        role: mini_openai::ROLE_USER.to_string(),
+                    });
                 }
+                
+                // Drop the lock to avoid holding it during the API request
+                drop(history_guard);
+
+                if !leader && request.messages.len() < 3 { 
+                    info!("Skipping first message");
+                        continue 
+                }
+
+                // Send the request to OpenAI
+                let response = match llm.chat_completions(&request).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        error!("OpenAI API request failed: {}", e);
+                        continue;
+                    }
+                };
+
+                let reply = response.choices.get(0)
+                    .and_then(|choice| Some(choice.message.content.clone()))
+                    .unwrap_or_else(|| "No response from OpenAI.".to_string())
+                    .replace("\n","")
+                    .replace("`", "");
+
+                debug!("{:#?}", response.choices.get(0));
+
+                let mut reply_chunks = Vec::new();
+                let mut chunk = String::new();
+                for word in reply.split_whitespace() {
+                    if chunk.len() + word.len() + 1 > 512 {
+                        reply_chunks.push(chunk.clone());
+                        chunk.clear();
+                    }
+                    chunk.push_str(word);
+                    chunk.push(' ');
+                }
+                
+                if !chunk.is_empty() {
+                    reply_chunks.push(chunk.clone());
+                }
+                
+                for chunk in reply_chunks {
+                                // Send the response back to the IRC channel
+                    client.send_privmsg(&args.channel, &chunk).unwrap();
+                }
+
+                // Add the response to history
+                let mut history_guard = history.lock().await;
+                history_guard.push(format!("{} - {}", args.nickname, &reply));
+
+                // Optionally, log the updated history
+                debug!("{:#?}", *history_guard);
             }
-            _ => {} // Ignore other commands
         }
+        _ => {} // Ignore other commands
     }
+}
 
     Ok(())
 }
