@@ -1,9 +1,9 @@
 use futures::*;
 use clap::Parser;
 use irc::client::prelude::*;
-use std::{error::Error, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 use tokio::sync::Mutex; // Import Tokio's asynchronous Mutex
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// Simple IRC Logger Application
@@ -45,6 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Initialize tracing subscriber for logging
     let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::DEBUG)
         .with_target(false) // Hide the target (module path)
         .with_thread_names(true)
         .with_thread_ids(true)
@@ -85,7 +86,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     client.identify()?;
 
     // Set up llm client
-    let llm = mini_openai::Client::new(None, None)?;
+    let api_key = env::var("OPENROUTER_API_KEY").ok();
+    let llm = mini_openai::Client::new(Some("https://openrouter.ai/api/v1".to_string()), api_key.clone())?;
+
+    debug!("{:?}", api_key);
 
     // Set up history of chat messages with a Tokio Mutex for safe asynchronous access
     let history = Arc::new(Mutex::new(Vec::new()));
@@ -105,7 +109,7 @@ while let Some(message) = stream.next().await.transpose()? {
                 // Prepare the OpenAI request
                 let mut request = mini_openai::ChatCompletions::default();
 
-                request.model = "o1-mini".to_string();
+                request.model = "quid/lfm-40b:free".to_string();
 
                 // Lock the history for reading
                 let mut history_guard = history.lock().await;
@@ -114,7 +118,7 @@ while let Some(message) = stream.next().await.transpose()? {
                 history_guard.push(format!("{} - {}", sender, msg));
 
                 // Add system message
-                request.messages.push(mini_openai::Message { content: "only respond with unformatted text messages, no markdown".to_string(), role:mini_openai::ROLE_USER.to_string()});
+                request.messages.push(mini_openai::Message { content: "only respond with unformatted text messages, no markdown or other formatting".to_string(), role:mini_openai::ROLE_USER.to_string()});
 
                 // Clone history for building the request
                 for message in history_guard.iter() {
@@ -141,6 +145,8 @@ while let Some(message) = stream.next().await.transpose()? {
                     }
                 };
 
+                debug!("{:#?}", response);
+
                 let reply = response.choices.get(0)
                     .and_then(|choice| Some(choice.message.content.clone()))
                     .unwrap_or_else(|| "No response from OpenAI.".to_string())
@@ -149,25 +155,27 @@ while let Some(message) = stream.next().await.transpose()? {
 
                 debug!("{:#?}", response.choices.get(0));
 
-                let mut reply_chunks = Vec::new();
-                let mut chunk = String::new();
-                for word in reply.split_whitespace() {
-                    if chunk.len() + word.len() + 1 > 512 {
-                        reply_chunks.push(chunk.clone());
-                        chunk.clear();
-                    }
-                    chunk.push_str(word);
-                    chunk.push(' ');
-                }
-                
-                if !chunk.is_empty() {
-                    reply_chunks.push(chunk.clone());
-                }
-                
-                for chunk in reply_chunks {
                                 // Send the response back to the IRC channel
-                    client.send_privmsg(&args.channel, &chunk).unwrap();
-                }
+                client.send_privmsg(&args.channel, &reply).unwrap();
+                // let mut reply_chunks = Vec::new();
+                // let mut chunk = String::new();
+                // for word in reply.split_whitespace() {
+                //     if chunk.len() + word.len() + 1 > 1512 {
+                //         reply_chunks.push(chunk.clone());
+                //         chunk.clear();
+                //     }
+                //     chunk.push_str(word);
+                //     chunk.push(' ');
+                // }
+                
+                // if !chunk.is_empty() {
+                //     reply_chunks.push(chunk.clone());
+                // }
+                
+                // for chunk in reply_chunks {
+                                // Send the response back to the IRC channel
+                    // client.send_privmsg(&args.channel, &chunk).unwrap();
+                // }
 
                 // Add the response to history
                 let mut history_guard = history.lock().await;
