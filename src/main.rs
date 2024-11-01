@@ -53,8 +53,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .with_target(false) // Hide the target (module path)
-        .with_thread_names(true)
-        .with_thread_ids(true)
+        .with_thread_names(false)
+        .with_thread_ids(false)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)
@@ -81,9 +81,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })?;
 
     // Clone necessary variables for message processing
-    let _model = args.model.clone();
+    let model = args.model.clone();
     let leader = args.leader;
-    let nickname = args.nickname;
+    let nickname = args.nickname.clone();
 
     // Create a stream of incoming messages
     let mut stream = client.stream()?;
@@ -97,8 +97,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "https://openrouter.ai/api/v1".to_string(),
         api_key.clone(),
     )?;
-
-    debug!("{:?}", api_key);
 
     // Set up history of chat messages with a Tokio Mutex for safe asynchronous access
     let history = Arc::new(Mutex::new(Vec::new()));
@@ -180,7 +178,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Prepare the OpenAI request
             let request = mini_openai::ChatCompletions {
                 messages,
-                model: "anthracite-org/magnum-v4-72b".to_string(),
+                model: model.to_string(),
                 ..Default::default()
             };
 
