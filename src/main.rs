@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             for (sender, (msgs, last_instant)) in buffer_guard.iter_mut() {
                 if now.duration_since(*last_instant) >= Duration::from_secs(1) {
                     // Combine messages into one
-                    let combined_msg = msgs.join(" ");
+                    let combined_msg = msgs.join("\n");
                     to_process.push((sender.clone(), combined_msg.clone()));
                     // Clear the buffer for this sender
                     *msgs = Vec::new();
@@ -154,12 +154,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         while let Some((sender, msg)) = buffer_rx.recv().await {
             debug!("<Buffered {}> {}", sender, msg);
 
-
             // Lock the history for reading
             let mut history_guard = history_clone.lock().await;
 
             // Add the current message to the history
-            history_guard.push(format!("{} - {}", sender, msg));
+            history_guard.push(format!("{}: {}", sender, msg));
 
             let mut messages = vec![]; 
             
@@ -202,30 +201,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             debug!("{:#?}", response);
 
-            // Extract and clean the reply from OpenAI's response
+            // Extract and preserve the reply from OpenAI's response without stripping newlines or backticks
             let reply = response.choices.first()
                 .map(|choice| choice.message.content.clone())
-                .unwrap_or_else(|| "No response from OpenAI.".to_string())
-                .replace('\n'," ")
-                .replace('`', "");
+                .unwrap_or_else(|| "No response from OpenAI.".to_string());
 
             debug!("{:#?}", response.choices.first());
 
-            // Split the reply into 500-character chunks to adhere to IRC limits
-            let reply_chunks = split_into_chunks(&reply, 500);
+            // Split the reply into lines based on newlines
+            let lines = reply.split('\n').collect::<Vec<&str>>();
 
-            // Send each chunk with a small delay to handle IRC message limits
-            for chunk in reply_chunks {
-                if let Err(e) = client.send_privmsg(&channel_clone, &chunk) {
-                    error!("Failed to send message chunk: {}", e);
+            for line in lines {
+                let trimmed_line = line.trim();
+                if trimmed_line.is_empty() {
+                    continue; // Skip empty lines
                 }
-                // Introduce a small delay to prevent rapid sending
-                time::sleep(Duration::from_millis(100)).await;
+
+                // Further split each line into chunks if it exceeds the max IRC message size
+                let reply_chunks = split_into_chunks(trimmed_line, 500);
+
+                for chunk in reply_chunks {
+                    if let Err(e) = client.send_privmsg(&channel_clone, &chunk) {
+                        error!("Failed to send message chunk: {}", e);
+                    }
+                    // Introduce a small delay to prevent rapid sending
+                    time::sleep(Duration::from_millis(100)).await;
+                }
             }
 
             // Add the response to history
             let mut history_guard = history_clone.lock().await;
-            history_guard.push(format!("{} - {}", nickname_clone, &reply));
+            history_guard.push(format!("{}: {}", nickname_clone, &reply));
 
             // Optionally, log the updated history
             debug!("{:#?}", *history_guard);
@@ -255,9 +261,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             if current_chunk.len() + word.len() + 1 > max_size && !current_chunk.is_empty() {
-                    chunks.push(current_chunk.clone());
-                    current_chunk.clear();
-                }
+                chunks.push(current_chunk.clone());
+                current_chunk.clear();
+            }
 
             if !current_chunk.is_empty() {
                 current_chunk.push(' ');
@@ -274,22 +280,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Process incoming messages and buffer them
     while let Some(message) = stream.next().await.transpose()? {
-           if let Command::PRIVMSG(target, msg) = &message.command {
-                // Only process messages from the specified channel
-                if target.eq_ignore_ascii_case(&args.channel) {
-                    let sender = message
-                        .source_nickname()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    debug!("<{}> {}", sender, msg);
+        if let Command::PRIVMSG(target, msg) = &message.command {
+            // Only process messages from the specified channel
+            if target.eq_ignore_ascii_case(&args.channel) {
+                let sender = message
+                    .source_nickname()
+                    .unwrap_or("unknown")
+                    .to_string();
+                debug!("<{}> {}", sender, msg);
 
-                    // Add the message to the buffer with the current timestamp
-                    let mut buffer_guard = message_buffer.lock().await;
-                    let entry = buffer_guard.entry(sender.clone()).or_insert((Vec::new(), Instant::now()));
-                    entry.0.push(msg.clone());
-                    entry.1 = Instant::now(); // Update the last received time
-                }
+                // Add the message to the buffer with the current timestamp
+                let mut buffer_guard = message_buffer.lock().await;
+                let entry = buffer_guard.entry(sender.clone()).or_insert((Vec::new(), Instant::now()));
+                entry.0.push(msg.clone());
+                entry.1 = Instant::now(); // Update the last received time
             }
+        }
     }
 
     // Await the processing task (this point is typically never reached)
@@ -297,4 +303,3 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
-
