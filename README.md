@@ -11,6 +11,8 @@ Built with Rust using:
 
 ## Setup
 
+*Get a environment for running/developing quick and easy using devenv, see the devenv.nix*
+
 1. Get OpenRouter API key
 1. `export OPENROUTER_API_KEY='your-key'`
 1. `cargo run -- -m "modelname" -n "nick" -c "#channel"`
