@@ -161,6 +161,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             history_guard.push(format!("{}: {}", sender, msg));
 
             let mut messages = vec![]; 
+
+            messages.push(mini_openai::Message{
+            content: "When being called, you have an option to not answer. If you dont want to answer or engage, you shall simply write ignore, without any additional formatting".to_string(),
+            role: mini_openai::ROLE_SYSTEM.to_string(),
+        });
             
             // Build the messages with the correct roles
             for message in history_guard.iter() {
@@ -184,8 +189,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Drop the lock to avoid holding it during the API request
             drop(history_guard);
 
-            // Skip processing if not a leader and there are fewer than 2 messages in history
-            if !leader_clone && request.messages.len() < 2 { 
+            // Skip processing if not a leader and there are fewer than 3  messages in history
+            if !leader_clone && request.messages.len() < 3 { 
                 info!("Skipping first message");
                 continue;
             }
@@ -205,6 +210,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let reply = response.choices.first()
                 .map(|choice| choice.message.content.clone())
                 .unwrap_or_else(|| "No response from OpenAI.".to_string());
+
+            let words: Vec<&str> = reply.split_whitespace().collect();
+            if words.first().map(|w| w.trim_matches(|c| c == '.' || c == ',').to_lowercase()) == Some("ignore".to_lowercase()) {
+                continue;
+            }
 
             debug!("{:#?}", response.choices.first());
 
